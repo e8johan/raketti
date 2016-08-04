@@ -1,0 +1,343 @@
+<!doctype html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Hybrid Raketti</title>
+
+    <style type="text/css">
+        body { overflow:hidden; }
+    </style>
+</head>
+<body>
+    <script src="js/pixi.min.js"></script>
+    <script src="js/scaleToWindow.js"></script>
+    <script src="js/sound.js"></script>
+    <script>
+        var newStyle = document.createElement("style");
+        var style = "* {padding: 0; margin: 0}";
+        newStyle.appendChild(document.createTextNode(style));
+        document.head.appendChild(newStyle);
+
+        //Create the renderer
+        var renderer = PIXI.autoDetectRenderer(800, 500, {antialias: false, transparent: false, resolution: 1}); // 16x10 proportions
+
+        renderer.view.style.position = "absolute";
+        renderer.view.style.display = "block";
+        renderer.autoResize = true;
+
+        //Add the canvas to the HTML document
+        document.body.appendChild(renderer.view);
+
+        scaleToWindow(renderer.view);
+        window.addEventListener("resize", function(event){
+            scaleToWindow(renderer.view);
+        });
+
+        //Create a container object called the `stage`
+        var stage = new PIXI.Container();
+
+        PIXI.loader
+            .add("images/background.png")
+            .add("images/map.png")
+            .add("images/ship.png")
+            .add("images/explosion.png")
+            .load(setup);
+
+        // From https://github.com/kittykatattack/learningPixi#keyboard-movement
+        function keyboard(keyCode) {
+            var key = {};
+            key.code = keyCode;
+            key.isDown = false;
+            key.isUp = true;
+            key.press = undefined;
+            key.release = undefined;
+
+            //The `downHandler`
+            key.downHandler = function(event) {
+                if (event.keyCode === key.code) {
+                    if (key.isUp && key.press) key.press();
+                        key.isDown = true;
+                        key.isUp = false;
+                    }
+                    event.preventDefault();
+                };
+
+            //The `upHandler`
+            key.upHandler = function(event) {
+                if (event.keyCode === key.code) {
+                    if (key.isDown && key.release) key.release();
+                        key.isDown = false;
+                        key.isUp = true;
+                    }
+                    event.preventDefault();
+                };
+
+            //Attach event listeners
+            window.addEventListener(
+                "keydown", key.downHandler.bind(key), false
+            );
+            window.addEventListener(
+                "keyup", key.upHandler.bind(key), false
+            );
+            return key;
+        }
+
+        // From https://github.com/kittykatattack/sound.js
+        function explosionSound() {
+            soundEffect(
+                20,          //frequency
+                0,           //attack
+                1,           //decay
+                "sawtooth",  //waveform
+                1,           //volume
+                0,           //pan
+                0,           //wait before playing
+                0,           //pitch bend amount
+                false,       //reverse
+                20,          //random pitch range
+                50,          //dissonance
+                undefined,   //echo array: [delay, feedback, filter]
+                undefined    //reverb array: [duration, decay, reverse?]
+            );
+        }
+
+        // Main game state
+        var gameState;
+
+        // Holds the keys that are being monitored
+        var keys = {};
+
+        var shipData, mapData;
+
+        // Visible elements
+        var container;      // Holds the moveable part of the stage
+        var map;            // Holds the hit sensitive map
+        var ship;           // Holds the ship TODO should be one per angle
+        var shots = [];     // Holds shots, deleted when they hit something
+        var fragments = []; // Holds fragments, deleted when they time out
+        var message;        // Holds on-screen message TODO replace with status bar
+
+        // Configuration
+        var ANGLE_STEPS = 60;
+        var GRAVITY_PULL = 0.06;
+        var MAX_SPEED2 = 25;
+        var CRASH_SPEED2 = 4;
+
+        // Ship states
+        var SHIP_OK = "K";
+        var SHIP_EXPLODED = "X";
+
+        function setup() {
+            keys['left'] = keyboard(37);
+            keys['thrust'] = keyboard(38); // up
+            keys['right'] = keyboard(39);
+            keys['shoot'] = keyboard(32); // space
+
+            container = new PIXI.Container();
+
+            var bg = new PIXI.Sprite(
+                PIXI.loader.resources["images/background.png"].texture
+            );
+            bg.x = 0;
+            bg.y = 0;
+            container.addChild(bg);
+
+            map = new PIXI.Sprite(
+                PIXI.loader.resources["images/map.png"].texture
+            );
+            map.x = 0;
+            map.y = 0;
+            container.addChild(map);
+
+            // TODO precalculate and store as a string
+            var t = new PIXI.RenderTexture(renderer, map.width, map.height);
+            t.render(map);
+            mapData = t.getPixels();
+
+            // TODO store one sprite + precalculated map per angle
+            ship = new PIXI.Sprite(
+                PIXI.loader.resources["images/ship.png"].texture
+            );
+            ship.fx = 470;
+            ship.fy = 458;
+            ship.x = Math.ceil(ship.fx);
+            ship.y = Math.ceil(ship.fy);
+            ship.vx = 0;
+            ship.vy = 0;
+            ship.pivot.set(ship.width/2, ship.height/2);
+            ship.thrust = false;
+            ship.angle = 0;
+            ship.state = SHIP_OK;
+            container.addChild(ship);
+
+            t = new PIXI.RenderTexture(renderer, ship.width, ship.height);
+            t.render(ship);
+            shipData = t.getPixels();
+
+            stage.addChild(container);
+
+            message = new PIXI.Text(
+                "Hello",
+                {font: "32px sans-serif", fill: "white"}
+            );
+            message.position.set(0, 0);
+            stage.addChild(message);
+
+            gameState = playState;
+
+            mainLoop();
+        }
+
+
+        function mainLoop() {
+            requestAnimationFrame(mainLoop);
+
+            gameState();
+
+            renderer.render(stage);
+        }
+
+        function playState() {
+            if (ship.state === SHIP_OK) {
+                // Determine if ship has hit somethings
+                var hit = false;
+
+                var sx = Math.ceil(ship.x-ship.pivot.x);
+                var sy = Math.ceil(ship.y-ship.pivot.y);
+                for (var y=0; y<ship.height; ++y)
+                    for (var x=0; x<ship.width; ++x) {
+                        var shipPixel = shipData[(y*ship.width + x)*4+3];
+                        if (shipPixel != 0) {
+                            var mapPixel = mapData[((sy+y)*map.width+sx+x)*4+3];
+                            if (mapPixel != 0) {
+                                hit = true;
+                                break;
+                            }
+                        }
+                    }
+
+                // Sample keys and update ship state
+                ship.thrust = keys['thrust'].isDown;
+                if (keys['left'].isDown)
+                    ship.angle -= 1;
+                if (keys['right'].isDown)
+                    ship.angle += 1;
+
+                // Fix rotation
+                while (ship.angle < 0)
+                    ship.angle += ANGLE_STEPS;
+                while (ship.angle > ANGLE_STEPS)
+                    ship.angle -= ANGLE_STEPS;
+
+                ship.rotation = ship.angle*(360/ANGLE_STEPS)/PIXI.RAD_TO_DEG; // TODO replace with different images
+
+                // Update ship velocity
+                if (!hit) // No gravity pull if landed, i.e. hit
+                    ship.vy += GRAVITY_PULL;
+                if (ship.thrust) {
+                    ship.vx += Math.sin(ship.rotation)/2.0;
+                    ship.vy -= Math.cos(ship.rotation)/2.0;
+                }
+
+                // Limit max velocity
+                var speed2 = ship.vx*ship.vx + ship.vy*ship.vy
+                if (speed2 > MAX_SPEED2)
+                {
+                    ship.vx *= (MAX_SPEED2/speed2);
+                    ship.vy *= (MAX_SPEED2/speed2);
+                }
+
+                // Adjust ship if landed, or explode it
+                if (hit) {
+                    if (speed2 > CRASH_SPEED2 || !(ship.angle < 2 || ship.angle > (ANGLE_STEPS-3))) {
+                        // Explode ship
+                        explosionSound();
+
+                        ship.state = SHIP_EXPLODED;
+                        ship.visible = false;
+
+                        // Replace ship with fragments
+                        for (var y=0; y<ship.height; ++y)
+                            for (var x=0; x<ship.width; ++x) {
+                                var shipPixel = shipData[(y*ship.width + x)*4+3];
+                                if (shipPixel != 0) {
+                                    var texture = PIXI.loader.resources["images/explosion.png"].texture.clone();
+                                    var row = Math.floor(Math.random()*5);
+                                    var rect = new PIXI.Rectangle(0, row, 1, 1);
+                                    texture.frame = rect;
+                                    var fragment = new PIXI.Sprite(texture);
+
+                                    fragment.x = ship.x + x-ship.pivot.x;
+                                    fragment.y = ship.y + y-ship.pivot.y;
+                                    fragment.vx = (Math.random()-0.5)*4 + Math.random()*ship.vx;
+                                    fragment.vy = (Math.random()-0.5)*4 + Math.random()*ship.vy;
+                                    fragment.age = 100;
+                                    fragment.row = row;
+                                    console.log(row);
+                                    fragments.push(fragment);
+                                    container.addChild(fragment);
+                                }
+                            }
+                    }
+                    else if (speed2 != 0 && (ship.angle < 2 || ship.angle > (ANGLE_STEPS-3)) && ship.vy >= 0) {
+                        ship.angle = 0; // Straighten the ship when landed
+                        ship.rotation = 0; // Replace with sprite
+                        ship.fx -= ship.vx;
+                        ship.fy -= ship.vy;
+                        ship.x = Math.ceil(ship.fx);
+                        ship.y = Math.ceil(ship.fy);
+                        ship.vx = 0;
+                        ship.vy = 0;
+                    }
+                }
+
+                // Update ship position
+                ship.fx += ship.vx;
+                ship.fy += ship.vy;
+
+                ship.x = Math.ceil(ship.fx);
+                ship.y = Math.ceil(ship.fy);
+            }
+            else if (ship.state === SHIP_EXPLODED) {
+                message.text = "BOOM";
+            }
+
+            // Todo update shots
+
+            // Update fragments
+            var nextFrags = [];
+            for (var i=0; i<fragments.length; ++i) {
+                fragments[i].x += fragments[i].vx;
+                fragments[i].y += fragments[i].vy;
+                fragments[i].vy += GRAVITY_PULL;
+                fragments[i].age --;
+                var mapPixel = mapData[(Math.ceil(fragments[i].y)*map.width+Math.ceil(fragments[i].x))*4+3];
+                if (fragments[i].age > 0 && mapPixel == 0) {
+                    nextFrags.push(fragments[i]);
+                    var rect = new PIXI.Rectangle(100-fragments[i].age, fragments[i].row, 1, 1);
+                    fragments[i].texture.frame = rect;
+                }
+                else
+                    container.removeChild(fragments[i]);
+            }
+            fragments = nextFrags;
+
+            // Update view position (keep ship centered unless the map ends)
+            var cx = ship.x-renderer.width/2;
+            var cy = ship.y-renderer.height/2;
+
+            if (cx < 0)
+                cx = 0;
+            if (cx + renderer.width > map.width)
+                cx = map.width-renderer.width;
+
+            if (cy < 0)
+                cy = 0;
+            if (cy + renderer.height > map.height)
+                cy = map.height-renderer.height;
+
+            container.position.set(-cx, -cy);
+        }
+
+    </script>
+</body>
