@@ -15,7 +15,7 @@ This is a pure client side web application. If you want to run it locally, use s
 python -m SimpleHTTPServer
 ```
 
-There is not need to deploy this to your own web server, instead, use the URL e8johan.se/projects/raketti .
+There is not need to deploy this to your own web server, instead, use the URL http://e8johan.se/projects/raketti .
 
 Licenses
 ========
